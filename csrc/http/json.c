@@ -1,5 +1,4 @@
 #include <runtime.h>
-#include <unix/unix.h>
 #include <http/http.h>
 
 void print_value_json(buffer out, value v)
@@ -14,9 +13,18 @@ void print_value_json(buffer out, value v)
     case estring_space:
         {
             estring si = v;
-            bprintf(out , "\"");
-            buffer_append(out, si->body, si->length);
-            bprintf(out , "\"");
+            buffer current = alloca_wrap_buffer(si->body, si->length);
+            buffer_write_byte(out , '"');
+            string_foreach(current, ch) {
+                if(ch == '\\' || ch == '"') {
+                    bprintf(out , "\\");
+                } else if(ch == '\n') {
+                    bprintf(out , "\\n");
+                    continue;
+                }
+                buffer_write_byte(out , ch);
+            }
+            buffer_write_byte(out , '"');
         }
         break;
     default:
@@ -64,6 +72,8 @@ static void json_input(json_parser p, buffer b, thunk t)
 
     // xxx - use foreach rune
     string_foreach(b, c) {
+
+        // create a bag for this message if one doesn't exist
         if (!p->b) {
             p->b = create_bag(p->h, p->pu);
             p->n = generate_uuid();
@@ -73,7 +83,8 @@ static void json_input(json_parser p, buffer b, thunk t)
             estring tes= intern_buffer(p->tag);
             estring ves= intern_buffer(p->value);
 
-            edb_insert(p->b, p->n, tes, ves, 1);
+            // xxx - should have some interesting source id here
+            edb_insert(p->b, p->n, tes, ves, 1, 0);
             buffer_clear(p->tag);
             buffer_clear(p->value);
         }
@@ -81,6 +92,8 @@ static void json_input(json_parser p, buffer b, thunk t)
         if ((c == '}')  && (p->s == sep)) {
             apply(p->out, p->b, p->n, t);
             p->b = 0;
+            p->s = 0;
+            p->backslash = false;
         }
 
         if ((c == separator[p->s]) && !p->backslash) {
@@ -88,6 +101,7 @@ static void json_input(json_parser p, buffer b, thunk t)
             else p->s++;
         } else {
             if (p->backslash && (c == 'n')) c = '\n';
+            if (p->backslash && (c == 't')) c = '\t';
             if (c == '\\') {
                 p->backslash = true;
             }  else {

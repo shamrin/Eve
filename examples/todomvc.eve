@@ -5,9 +5,11 @@ routing
     [@app filter: value]
 
 handle insert
-  [#keydown element: [@new-todo value] key: "enter"]
+  element = [@new-todo value]
+  [#keydown element, key: "enter"]
   freeze
     [#todo body: value, editing: false, completed: false]
+    element.value := ""
 
 handle edit
   (todo, body, editing, completed) =
@@ -49,7 +51,7 @@ draw todomvc
   none-checked = if [#todo completed: true] then false
                 else true
   maintain
-    [#link rel: "stylesheet" href: "http://localhost:8080/example/todomvc.css"]
+    [#link rel: "stylesheet" href: "/examples/todomvc.css"]
     [#div class: "todoapp" @todoapp children:
       [#header children:
         [#h1 text: "todos"]

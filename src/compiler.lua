@@ -3,6 +3,7 @@ local Pkg = {}
 local std = _G
 local error = error
 local print = print
+local next = next
 local pairs = pairs
 local ipairs = ipairs
 local type = type
@@ -35,7 +36,7 @@ function flattenProjection(projection)
   for ix, layerOrVar in ipairs(projection) do
     if layerOrVar.type == "variable" then
       neue:add(layerOrVar)
-    elseif layerOrVar.type == "projection" then
+    elseif layerOrVar.type == "projection" or layerOrVar.type == "grouping" then
       neue:add(layerOrVar.variable)
     elseif getmetatable(layerOrVar) == Set then
       neue:union(layerOrVar, true)
@@ -64,6 +65,7 @@ function unify(query, mapping, projection)
   mapping = mapping or {}
   query.mapping = {}
   local variableBindings = {}
+  local variableProjections = {}
 
   function flattify(nodes)
     for _, node in ipairs(nodes or nothing) do
@@ -75,6 +77,27 @@ function unify(query, mapping, projection)
             variableBindings[variable] = Set:new{binding}
           else
             variableBindings[variable]:add(binding)
+          end
+        end
+      end
+
+      if node.projection then
+        for variable in pairs(node.projection) do
+          query.mapping[variable] = variable
+          if not variableProjections[variable] then
+            variableProjections[variable] = Set:new{node.projection}
+          else
+            variableProjections[variable]:add(node.projection)
+          end
+        end
+      end
+      if node.groupings then
+        for variable in pairs(node.groupings) do
+          query.mapping[variable] = variable
+          if not variableProjections[variable] then
+            variableProjections[variable] = Set:new{node.groupings}
+          else
+            variableProjections[variable]:add(node.groupings)
           end
         end
       end
@@ -180,6 +203,16 @@ function unify(query, mapping, projection)
               binding.variable = mapping[var]
             end
           end
+
+          for proj in pairs(variableProjections[var] or nothing) do
+            if not mapping[var] then
+              proj:remove(var)
+              proj:add(variable)
+            else
+              proj:remove(var)
+              proj:add(mapping[var])
+            end
+          end
         end
       end
     end
@@ -258,7 +291,7 @@ function presort(nodes, typeCost)
   local idSorted = idSort(nodes)
   local presorted = {}
 
-  typeCost = typeCost or {mutate = 0, expression = 100, ["not"] = 200, choose = 300, union = 400, object = 500}
+  typeCost = typeCost or {mutate = 1000, expression = 100, ["not"] = 200, choose = 300, union = 400, object = 500}
   while #idSorted > 0 do
     local cheapest
     local cheapestCost = 2^52
@@ -418,24 +451,26 @@ function DependencyGraph:addExpressionNode(node)
       deps.anyDepends:add(args.b)
     end
   else
-    local schemas = db.getSchemas(node.operator)
-    if not schemas then
+    local signature = db.getSignature(node.bindings)
+    local schemas = db.getPossibleSchemas(node.operator, signature)
+    if schemas:length() < 1 then
       self.ignore = true
       errors.unknownExpression(self.context, node, db.getExpressions())
       return
     end
 
+    local pattern = util.shallowCopy(next(schemas, nil).signature)
     local rest
-    for _, schema in ipairs(schemas) do
+    for schema in pairs(schemas) do
       rest = schema.rest
     end
-    local pattern = util.shallowCopy(schemas[1].signature)
     for field in pairs(args) do
       if not pattern[field] then
         pattern[field] = rest
       end
     end
-    for _, schema in ipairs(schemas) do
+
+    for schema in pairs(schemas) do
       for field in pairs(schema.signature) do
         if pattern[field] ~= schema.signature[field] then
           pattern[field] = db.OPT
@@ -447,9 +482,11 @@ function DependencyGraph:addExpressionNode(node)
       if args[field] and args[field].type ~= "constant" then
         if pattern[field] == db.IN then
           deps.depends:add(args[field])
-          deps.contributes:add(self:cardinal(args[field]))
         elseif pattern[field] == db.STRONG_IN then
           deps.depends:add(self:cardinal(args[field]))
+        elseif pattern[field] == db.FILTER_IN then
+          deps.depends:add(args[field])
+          deps.contributes:add(self:cardinal(args[field]))
         elseif pattern[field] == db.OUT then
           deps.provides:add(args[field])
         else
@@ -847,6 +884,11 @@ function DependencyGraph:order(allowPartial)
           errors.unorderableGraph(self.context, self.query)
         end
         self.ignore = true
+
+        -- for group in pairs(self.termGroups) do
+        --   local depends = self.groupDepends[group]
+        --   print(group, depends:length(), depends)
+        -- end
       end
 
       break
@@ -1060,7 +1102,7 @@ function unpackObjects(dg, context)
         end
       end
     elseif node.type == "expression" and node.projection then
-      local subproject = SubprojectNode:new({query = dg.query, kind = "aggregate", projection = node.projection, provides = node.deps.provides, nodes = {node}}, node, context)
+      local subproject = SubprojectNode:new({query = dg.query, kind = "aggregate", projection = node.projection, groupings = node.groupings, provides = node.deps.provides, nodes = {node}}, node, context)
       if node.operator == "count" then
         local constant = makeNode(context, "constant", node, {generated = true, constant = 1, constantType = "number"})
         node.bindings[#node.bindings + 1] = makeNode(context, "binding", node, {generated = true, field = "a", constant = constant})
@@ -1086,27 +1128,25 @@ function compileExec(contents, tracing)
   local context = parseGraph.context
 
   if context.errors and #context.errors ~= 0 then
-    print("Bailing due to errors.")
-    return 0
+    return {}, util.toFlatJSON(parseGraph), {}
   end
 
   local set = {}
-  local nameset = {}
 
   for ix, queryGraph in ipairs(parseGraph.children) do
     local dependencyGraph = DependencyGraph:fromQueryGraph(queryGraph, context)
     local unpacked = unpackObjects(dependencyGraph, context)
+    local head, regs
     -- @NOTE: We cannot allow dead DGs to still try and run, they may be missing filtering hunks and fire all sorts of missiles
     if not dependencyGraph.ignore then
-      set[#set+1] = queryGraph
-      nameset[#nameset+1] = queryGraph.name
+      head, regs = build.build(queryGraph, tracing, parseGraph.context)
+      set[#set+1] = {head = head, regs = regs, name = queryGraph.name}
     end
   end
   if context.errors and #context.errors ~= 0 then
-    print("Bailing due to errors.")
-    return 0
+    return {}, util.toFlatJSON(parseGraph)
   end
-  return build.build(set, tracing, parseGraph), util.toFlatJSON(parseGraph), nameset
+  return set, util.toFlatJSON(parseGraph)
 end
 
 function analyze(content, quiet)

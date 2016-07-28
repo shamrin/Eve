@@ -81,7 +81,6 @@ function errors.crazySyntax(context, token)
 
   <LINE>
   ]])})
-  error("Parse failure")
 end
 
 function errors.invalidTopLevel(context, token)
@@ -119,6 +118,19 @@ function errors.invalidCloseParen(context, token, stack)
 
   <LINE>
   ]]})
+end
+
+function errors.curlyOutsideOfString(context, token, stack)
+  -- we can use the stack to determine what might have happened
+  local square = token.value == "{" and "[" or "]"
+  printError({type = "Curly brace outside of string", context = context, token = token, content = string.format([[
+  Double curly braces are used for embedding values in strings, but don't
+  apply anywhere else.
+
+  <LINE>
+
+  Did you mean to use `%s`?
+  ]], square)})
 end
 
 ------------------------------------------------------------
@@ -320,7 +332,7 @@ function errors.invalidEqualityLeft(context, token, prev)
     `%s` should be inbetween two expressions
 
     <LINE>
-    ]], token.value)})
+    ]], token.value or token.type)})
   else
     printError({type = "Invalid equivalence", context = context, token = token, content = string.format([[
     `%s` can only be used between expressions
@@ -328,6 +340,18 @@ function errors.invalidEqualityLeft(context, token, prev)
     <LINE>
     ]], token.value)})
   end
+end
+
+function errors.invalidEqualityRight(context, equality)
+  -- TODO: there should be some way for us to capture enough information to determine what
+  -- specific issue you're running into
+  printError({type = "Invalid equivalence", context = context, token = equality, content = string.format([[
+  I'm not sure what to do with `%s` here.
+
+  <LINE>
+
+  Chances are this is a an `%s` after another form of equality or after an else.
+  ]], equality.operator, equality.operator)})
 end
 
 ------------------------------------------------------------
@@ -431,6 +455,15 @@ function errors.outputTypeMismatch(context, node, outputs)
   ]])})
 end
 
+function errors.invalidOutputType(context, output)
+  printError({type = "If returns can only be values", context = context, token = output, content = string.format([[
+  The values returned from an `if ... then` or an `else` can only be
+  expressions or values.  Looks like you've got a `%s` here.
+
+  <LINE>
+  ]], output.type)})
+end
+
 ------------------------------------------------------------
 -- Update errors
 ------------------------------------------------------------
@@ -479,11 +512,7 @@ end
 
 function formatVariable(variable)
   if variable.type ~= "variable" then return "????" end
-  if  variable.cardinal then
-    return string.sub(variable.name, 2, -2)
-  else
-    return variable.name
-  end
+  return variable.name
 end
 
 function filterGenerated(variables)

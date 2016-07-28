@@ -1,15 +1,16 @@
 typedef void *value;
 
+#include <math.h>
 #include <core/core.h>
+#include <unix/unix.h>
 #include <types.h>
 
 typedef enum {
     op_insert = 1,
-    op_remove,
     op_flush,
     op_close
 } operator;
-    
+
 
 u64 key_of(value);
 boolean equals(value, value);
@@ -43,6 +44,7 @@ typedef struct perf {
     int count;
     ticks start;
     ticks time;
+    int trig;
 } *perf;
 
 typedef closure(execf, heap, perf, operator, value *);
@@ -55,9 +57,7 @@ string bag_dump(heap h, bag b);
 
 void print_value(buffer, value);
 
-void prf(char *, ...);
-
-typedef closure(listener, value, value, value, multiplicity);
+typedef closure(listener, value, value, value, multiplicity, uuid);
 typedef closure(scan, int, listener, value, value, value);
 
 typedef struct node *node;
@@ -70,7 +70,8 @@ struct node {
     estring type;
     buildf builder;
     vector arms;
-    vector arguments; // always vectors of vectors
+    table arguments;
+    table display;
 };
 
 
@@ -82,22 +83,29 @@ typedef closure(block_completion, boolean);
 typedef struct compiled {
     string name;
     node head;
+    int regs;
 } *compiled;
-    
+
 struct block {
     heap h;
+    int regs;
     string name;
-    vector finish;
     execf head;
     evaluation ev;
     table nmap;
 };
 
 
-static inline void start_perf(perf p)
+static inline void start_perf(perf p, operator op)
 {
-    p->count++;
+    if (op== op_insert) {
+        if (p->trig == 1) p->count=0;
+        p->count++;
+    }
+    if (op == op_flush) p->trig = 1;
+
     p->start = rdtsc();
+
 }
 
 static inline void stop_perf(perf p, perf pp)
@@ -108,33 +116,33 @@ static inline void stop_perf(perf p, perf pp)
     p->time += delta;
 }
 
-    
+
 struct evaluation  {
     heap h;
     heap working;
     insertron insert;
     table counters;
 
-    // uhh...wow, there are alot of versions
     table block_solution;
-    table f_solution;
-    table next_f_solution;
+    table solution;
+    table last_f_solution;
     table t_solution;
-    table next_t_solution;
-    table ev_solution;
 
     table persisted;
     table scopes;
     vector blocks;
+    vector event_blocks;
     scan reader;
     ticks t;
-    boolean pass, non_empty;
+    boolean non_empty;
     evaluation_result complete;
-    
+
     thunk terminal;
     thunk run;
-    long intermediates;
     ticks cycle_time;
+    table f_bags;
+    int t_delta_count;
+    block bk;
 };
 
 
@@ -150,5 +158,6 @@ vector compile_eve(heap h, buffer b, boolean tracing, buffer *desc);
 evaluation build_evaluation(table scopes, table persisted, evaluation_result e);
 void run_solver(evaluation s);
 void inject_event(evaluation, buffer b, boolean);
+void block_close(block);
 
 #include <edb.h>

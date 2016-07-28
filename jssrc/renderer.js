@@ -26,9 +26,14 @@ var supportedTags = {
   "table": true, "tbody": true, "thead": true, "tr": true, "th": true, "td": true,
   "form": true, "optgroup": true, "option": true, "select": true, "textarea": true,
   "title": true, "meta": true, "link": true,
-  "svg": true, "circle": true, "line": true
+  "svg": true, "circle": true, "line": true, "rect": true, "text": true, "image": true
 };
-var svgs = {"svg": true, "circle": true, "line": true};
+var svgs = {"svg": true, "circle": true, "line": true, "rect": true, "text": true, "image": true};
+// Map of input entities to a queue of their values which originated from the client and have not been received from the server yet.
+var sentInputValues = {};
+var lastFocusPath = null;
+var updatingDOM = null;
+var selectableTypes = {"": true, undefined: true, text: true, search: true, password: true, tel: true, url: true};
 
 function insertSorted(parent, child) {
   let current;
@@ -61,6 +66,13 @@ function safeEav(eav) {
 }
 
 function handleDOMUpdates(result) {
+
+  if(document.activeElement && document.activeElement.entity) {
+    updatingDOM = document.activeElement;
+  }
+  if(!updatingDOM) {
+    updatingDOM = true;
+  }
   let {insert, remove} = result;
   let additions = {};
   // build up a representation of the additions
@@ -139,7 +151,7 @@ function handleDOMUpdates(result) {
             }
             break;
           case "class":
-            if(value[0] == "⦑" && value[value.length - 1] == "⦒") {
+            if(value[0] == "⦑" && value[value.length - 1] == "⦒" && activeClasses[value]) {
               classesToMaybeGC.push(value);
               let classIx = activeClasses[value].indexOf(elem);
               if(classIx > -1) {
@@ -158,7 +170,14 @@ function handleDOMUpdates(result) {
             if(!additions[entity] || !additions[entity]["text"]) {
               elem.textContent = "";
             }
+          break;
+          case "value":
+          if(!additions[entity] || !additions[entity][attribute]) {
+              sentInputValues[entity] = [];
+              elem.removeAttribute(attribute);
+            }
             break;
+
           default:
             if(!additions[entity] || !additions[entity][attribute]) {
               elem.removeAttribute(attribute);
@@ -247,6 +266,14 @@ function handleDOMUpdates(result) {
       } else if(attr == "checked") {
         if(value) elem.setAttribute("checked", true);
         else elem.removeAttribute("checked");
+      } else if(attr == "value") {
+        if(sentInputValues[entId] && sentInputValues[entId][0] === value) {
+          sentInputValues[entId].shift();
+        } else {
+          sentInputValues[entId] = [];
+          // @FIXME: handle select both here and when something tagged option is added.
+          elem.value = value;
+        }
       } else {
         elem.setAttribute(attr, value);
       }
@@ -296,6 +323,27 @@ function handleDOMUpdates(result) {
       elem.className = elemClasses.join(" ");
     }
   }
+
+  if(lastFocusPath) {
+    let current = activeElements.root;
+    let ix = 0;
+    for(let segment of lastFocusPath) {
+      current = current.children[segment];
+      if(!current) {
+        updatingDOM.blur();
+        lastFocusPath = null;
+        break;
+      }
+      ix++;
+    }
+    if(current && current.entity !== updatingDOM.entity) {
+      current.focus();
+      if(updatingDOM.tagName === current.tagName && current.tagName === "INPUT" && selectableTypes[updatingDOM.type] && selectableTypes[current.type]) {
+        current.setSelectionRange(updatingDOM.selectionStart, updatingDOM.selectionEnd);
+      }
+    }
+  }
+  updatingDOM = false;
 }
 
 //---------------------------------------------------------
@@ -371,6 +419,18 @@ function sendSwap(query) {
   }
 }
 
+function sendSave(query) {
+  if(socket && socket.readyState == 1) {
+    socket.send(JSON.stringify({scope: "root", type: "save", query}))
+  }
+}
+
+function sendParse(query) {
+  if(socket && socket.readyState == 1) {
+    socket.send(JSON.stringify({scope: "root", type: "parse", query}))
+  }
+}
+
 //---------------------------------------------------------
 // Event bindings to forward events to the server
 //---------------------------------------------------------
@@ -381,7 +441,11 @@ window.addEventListener("click", function(event) {
   let objs = [];
   while(current) {
     if(current.entity) {
-      objs.push({tags: ["click"], element: current.entity});
+      let tags = ["click"];
+      if(current == target) {
+        tags.push("direct-target");
+      }
+      objs.push({tags, element: current.entity});
     }
     current = current.parentNode
   }
@@ -394,7 +458,11 @@ window.addEventListener("dblclick", function(event) {
   let objs = [];
   while(current) {
     if(current.entity) {
-      objs.push({tags: ["double-click"], element: current.entity});
+      let tags = ["double-click"];
+      if(current == target) {
+        tags.push("direct-target");
+      }
+      objs.push({tags, element: current.entity});
     }
     current = current.parentNode
   }
@@ -405,47 +473,111 @@ window.addEventListener("dblclick", function(event) {
 window.addEventListener("input", function(event) {
   let {target} = event;
   if(target.entity) {
-    let objs = [{tags: ["input"], element: target.entity, value: target.value}];
-    // sendEventObjs(objs);
+    if(!sentInputValues[target.entity]) {
+      sentInputValues[target.entity] = [];
+    }
+    sentInputValues[target.entity].push(target.value);
+    let query =
+    `input value updated
+      input = ${target.entity}
+      freeze
+        input.value := "${target.value.replace("\"", "\\\"")}"`;
+    sendEvent(query);
+    sendEventObjs([{tags: ["change"], element: target.entity}]);
   }
 });
+window.addEventListener("change", function(event) {
+  let {target} = event;
+  if(target.tagName == "INPUT" || target.tagName == "TEXTAREA") return;
+  if(target.entity) {
+    if(!sentInputValues[target.entity]) {
+      sentInputValues[target.entity] = [];
+    }
+    let value = target.value;
+    if(target.tagName == "SELECT") {
+      value = target.options[target.selectedIndex].value;
+    }
+    sentInputValues[target.entity].push(value);
+    let query =
+      `input value updated
+      input = ${target.entity}
+      freeze
+        input.value := "${value.replace("\"", "\\\"")}"`;
+    sendEvent(query);
+    let tags = ["change"];
+    if(target == target) {
+      tags.push("direct-target");
+    }
+    sendEventObjs([{tags, element: target.entity}]);
+  }
+});
+
+function getFocusPath(target) {
+  let root = activeElements.root;
+  let current = target;
+  let path = [];
+  while(current !== root && current) {
+    let parent = current.parentElement;
+    path.unshift(Array.prototype.indexOf.call(parent.children, current));
+    current = parent;
+  }
+  return path;
+}
 
 window.addEventListener("focus", function(event) {
   let {target} = event;
   if(target.entity) {
     let objs = [{tags: ["focus"], element: target.entity}];
     sendEventObjs(objs);
+    lastFocusPath = getFocusPath(target);
   }
 }, true);
 
 window.addEventListener("blur", function(event) {
+  if(updatingDOM) {
+    event.preventDefault();
+    return;
+  }
   let {target} = event;
   if(target.entity) {
     let objs = [{tags: ["blur"], element: target.entity}];
-    if(target.value !== undefined) {
-      objs.push({id: target.entity, value: target.value});
-    }
     sendEventObjs(objs);
+
+    if(lastFocusPath) {
+      let curFocusPath = getFocusPath(target);
+      if(curFocusPath.length === lastFocusPath.length) {
+        let match = true;
+        for(let ix = 0; ix < curFocusPath.length; ix++) {
+          if(curFocusPath[ix] !== lastFocusPath[ix]) {
+            match = false;
+            break;
+          }
+        }
+        if(match) {
+          lastFocusPath = null;
+        }
+      }
+    }
   }
 }, true);
 
 
-let keyMap = {13: "enter"}
+let keyMap = {13: "enter", 27: "escape"}
 window.addEventListener("keydown", function(event) {
   let {target} = event;
   let current = target;
   let objs = [];
   let key = event.keyCode;
   while(current) {
-    if(current.entity && current.value !== undefined) {
-      objs.push({tags: ["keydown"], element: current.entity, key: keyMap[key] || key});
-      if(current.value !== undefined) {
-        objs.push({id: current.entity, value: current.value});
+    if(current.entity) {
+      let tags = ["keydown"];
+      if (current == target) {
+        tags.push("direct-target");
       }
+      objs.push({tags, element: current.entity, key: keyMap[key] || key});
     }
-    current = current.parentNode
+    current = current.parentNode;
   }
-  // objs.push({tags: ["keydown"], element: "window", key});
   sendEventObjs(objs);
 });
 
@@ -456,15 +588,19 @@ window.addEventListener("keyup", function(event) {
   let key = event.keyCode;
   while(current) {
     if(current.entity) {
-      objs.push({tags: ["keyup"], element: current.entity, key});
+      let tags = ["keyup"];
+      if (current == target) {
+        tags.push("direct-target");
+      }
+      objs.push({tags, element: current.entity, key: keyMap[key] || key});
     }
-    current = current.parentNode
+    current = current.parentNode;
   }
   objs.push({tags: ["keyup"], element: "window", key});
-  // sendEventObjs(objs);
+  sendEventObjs(objs);
 });
 
-window.addEventListener("hashchange", function(event) {
+function onHashChange(event) {
   let hash = window.location.hash.substr(1);
   if(hash[0] == "/") hash = hash.substr(1);
   let segments = hash.split("/").map(function(seg, ix) {
@@ -474,19 +610,23 @@ window.addEventListener("hashchange", function(event) {
   `hash changed remove any current url segments
     url = [#url hash-segment]
     freeze
-      url -= [hash-segment]\n\n` +
-  `hash changed if there isn't already a url, make one
-    not([#url])
-    freeze
-      [#div text: "CHANGED! ${hash}"]
-      [#url hash-segment: ${segments.join(" ")}]\n\n` +
-  `add the new hash-segments if there is
-    url = [#url]
-    freeze
-      url := [hash-segment: ${segments.join(" ")}]
-  `
+      url -= [hash-segment]\n\n`;
+  if(hash !== "") {
+    query +=
+    `hash changed if there isn't already a url, make one
+      not([#url])
+      freeze
+        [#url hash-segment: ${segments.join(" ")}]\n\n` +
+    `add the new hash-segments if there is
+      url = [#url]
+      freeze
+        url := [hash-segment: ${segments.join(" ")}]
+    `;
+  }
   sendEvent(query);
-});
+}
+
+window.addEventListener("hashchange", onHashChange);
 
 //---------------------------------------------------------
 // Draw node graph
@@ -494,6 +634,7 @@ window.addEventListener("hashchange", function(event) {
 let activeLayers = {ids: true, registers: true};
 let activeIds = {};
 let activeParse = {};
+let editorParse = {};
 let allNodeGraphs = {};
 let showGraphs = false;
 let codeEditor;
@@ -523,8 +664,8 @@ function drawNode(nodeId, graph, state, seen) {
   let me = {c: `node`, children: [
     {c: `${node.type} node-text ${active}`, text: `${node.type} ${node.scan_type || ""} (${node.count || 0} | ${myTime}%)`},
     overlay,
+    {t:"pre", text: JSON.stringify(node.display, undefined, 2)},
     childrenContainer
-
   ]};
   if((node.type == "fork") || (node.type == "choose")) {
     childrenContainer.c += ` fork-node-children`;
@@ -544,6 +685,7 @@ function drawNode(nodeId, graph, state, seen) {
 }
 
 function posToToken(pos, lines) {
+  if(!lines) return false;
   let tokens = lines[pos.line + 1] || [];
   for(let token of tokens) {
     if(token.offset <= pos.ch && token.offset + token.value.length >= pos.ch) {
@@ -557,23 +699,125 @@ function doSwap(editor) {
   sendSwap(editor.getValue());
 }
 
+function doSave() {
+  sendSave(codeEditor.getValue());
+}
+
+function handleEditorParse(parse) {
+  let parseLines = parse.lines;
+  let from = {};
+  let to = {};
+  codeEditor.operation(function() {
+    console.time("highlight");
+    for(let line of codeEditor.dirtyLines) {
+      // clear all the marks on that line?
+      for(let mark of codeEditor.findMarks({line, ch: 0}, {line, ch: 1000000})) {
+        mark.clear();
+      }
+      from.line = line;
+      to.line = line;
+      let tokens = parseLines[line + 1];
+      if(tokens) {
+        let firstToken = tokens[0];
+        // figure out what type of line this is and set the appropriate
+        // line classes
+        let state;
+        for(let token of tokens) {
+          from.ch = token.surrogateOffset;
+          to.ch = token.surrogateOffset + token.surrogateLength;
+          let className = token.type;
+          if(state == "TAG" || state == "NAME") {
+            className += " " + state;
+          }
+          codeEditor.markText(from, to, {className, inclusiveRight: true});
+          state = token.type
+        }
+      }
+    }
+    codeEditor.dirtyLines = [];
+    console.timeEnd("highlight");
+  });
+}
+
 function injectCodeMirror(node, elem) {
   if(!node.editor) {
     let editor = new CodeMirror(node, {
+      tabSize: 2,
+      lineWrapping: true,
       extraKeys: {
         "Cmd-Enter": doSwap,
         "Ctrl-Enter": doSwap,
       }
     });
-    editor.setValue(elem.value);
+    editor.dirtyLines = [];
     editor.on("cursorActivity", function() {
       let pos = editor.getCursor();
       activeIds = nodeToRelated(pos, posToToken(pos, renderer.tree[elem.id].parse.lines), renderer.tree[elem.id].parse);
       drawNodeGraph();
     });
+    editor.on("change", function(cm, change) {
+      let {from, to, text} = change;
+      let end = to.line > from.line + text.length ? to.line : from.line + text.length;
+      for(let start = from.line; start <= end; start++) {
+        cm.dirtyLines.push(start);
+        let lineInfo = cm.lineInfo(start);
+        if(lineInfo) {
+          if(lineInfo.text.match(/^\s/)) {
+            cm.addLineClass(start, "background", "CODE");
+            // check the next line to see if it's indented. If it is then
+            // remove code-bottom from this guy if it has it. Otherwise,
+            // add code-bottom
+            let nextInfo = cm.lineInfo(start + 1);
+            let prevInfo = cm.lineInfo(start - 1);
+
+            let codeBelow = nextInfo && nextInfo.text.match(/^\s/);
+            let codeAbove = prevInfo && prevInfo.text.match(/^\s/);
+
+            if(codeBelow) {
+              cm.removeLineClass(start, "text", "CODE-BOTTOM");
+              cm.removeLineClass(start + 1, "text", "CODE-TOP");
+            } else if(nextInfo) {
+              //otherwise this line is the new CODE-BOTTOM
+              cm.addLineClass(start, "text", "CODE-BOTTOM");
+            }
+            if(codeAbove) {
+              cm.removeLineClass(start, "text", "CODE-TOP");
+              cm.removeLineClass(start - 1, "text", "CODE-BOTTOM");
+            } else if(prevInfo) {
+              //otherwise this line is the new CODE-TOP
+              cm.addLineClass(start, "text", "CODE-TOP");
+            }
+          } else {
+            cm.removeLineClass(start, "background", "CODE");
+            cm.removeLineClass(start, "text", "CODE-TOP");
+            cm.removeLineClass(start, "text", "CODE-BOTTOM");
+            cm.removeLineClass(start, "text", "HEADER");
+
+            // check if this is a header
+            if(lineInfo.text.match("^#+")) {
+              cm.addLineClass(start, "text", "HEADER");
+            }
+            // check above me to see if they need to be the new code bottom
+            let prevInfo = cm.lineInfo(start - 1);
+            if(prevInfo && prevInfo.text.match(/^\s/)) {
+              cm.addLineClass(start - 1, "text", "CODE-BOTTOM");
+            }
+          }
+        }
+      }
+    });
+    editor.on("changes", function(cm, changes) {
+      let value = cm.getValue();
+      sendParse(value);
+    });
+    editor.setValue(elem.value);
     codeEditor = editor;
     node.editor = editor;
   }
+}
+
+function setKeyMap(event) {
+  codeEditor.setOption("keyMap", event.currentTarget.value);
 }
 
 function CodeMirrorNode(info) {
@@ -583,7 +827,7 @@ function CodeMirrorNode(info) {
 }
 
 function indexParse(parse) {
-  let lines = {};
+  let lines = [];
   let tokens = parse.root.context.tokens
   for(let tokenId of tokens) {
     let token = parse[tokenId];
@@ -606,15 +850,14 @@ function indexParse(parse) {
   // if there isn't an active graph, then make the first query
   // active
   if(!activeIds["graph"]) {
-    console.log("setting", parse.root.children[0]);
     activeIds["graph"] = parse.root.children[0];
   }
-
-  activeParse = parse;
+  return parse;
 }
 
 function nodeToRelated(pos, node, parse) {
   let active = {};
+  if(!parse.root) return active;
   // search for which query we're looking at
   let prev;
   for(let queryId of parse.root.children) {
@@ -627,7 +870,7 @@ function nodeToRelated(pos, node, parse) {
     }
     prev = query;
   }
-  active["graph"] = prev.id;
+  if(prev) active["graph"] = prev.id;
 
   if(!node.id) return active;
   let {up, down} = parse.edges;
@@ -662,6 +905,10 @@ function compileAndRun() {
   doSwap(codeEditor);
 }
 
+function compileAndRun() {
+  doSave(codeEditor);
+}
+
 function injectProgram(node, elem) {
   node.appendChild(activeElements["root"]);
 }
@@ -687,27 +934,24 @@ function drawNodeGraph() {
   let graphs;
   let state = {activeIds};
   for(let headId in allNodeGraphs) {
-    if(activeParse.edges.up[headId][0] != activeIds["graph"]) continue;
+    if(!activeParse.edges.up[headId] || activeParse.edges.up[headId].indexOf(activeIds["graph"]) == -1) continue;
     let cur = allNodeGraphs[headId];
     state.rootTime = activeParse.cycle_time;
     let tree = drawNode(headId, cur, state, {});
-    // let ast = drawAST(activeParse.ast, state);
-    // let parse = drawParse(activeParse, state);
     let ordered = drawOrdered(activeParse.root.children, state);
     if(showGraphs) {
       graphs = {c: "graphs", children: [
-        // ast,
-        // parse,
         ordered,
         tree,
       ]}
     }
   }
+  let root = activeParse.root || {context: {errors: [], code: ""}};
   let program;
   let errors;
-  if(activeParse.root.context.errors.length) {
-    activeParse.root.context.errors.sort((a, b) => { return a.pos.line - b.pos.line; })
-    let items = activeParse.root.context.errors.map(function(errorInfo) {
+  if(root && root.context.errors.length) {
+    root.context.errors.sort((a, b) => { return a.pos.line - b.pos.line; })
+    let items = root.context.errors.map(function(errorInfo) {
       let fix;
       if(errorInfo.fixes) {
         fix = {c: "fix-it", text: "Fix it for me", fix: errorInfo.fixes, click: applyFix}
@@ -723,11 +967,27 @@ function drawNodeGraph() {
   } else {
     program = {c: "program-container", postRender: injectProgram}
   }
-  let root = {c: "parse-info", children: [
+  let outline = [];
+  if(root.ast) {
+    for(let childId of root.ast.children) {
+      let child = activeParse[childId];
+      for(let line of child.doc.split("\n")) {
+        outline.push({text: line});
+      }
+    }
+  }
+  let rootUi = {c: "parse-info", children: [
+    // {c: "outline", children: outline},
     {c: "run-info", children: [
-      CodeMirrorNode({value: activeParse.root.context.code, parse: activeParse}),
+      CodeMirrorNode({value: root.context.code, parse: activeParse}),
       {c: "toolbar", children: [
-        {c: "stats", text: `${activeParse.iterations} iterations took ${activeParse.total_time}s`},
+        {c: "stats", text: `total time: ${activeParse.total_time || 0}s`},
+        {t: "select", c: "show-graphs", change: setKeyMap, children: [
+          {t: "option", value: "default", text: "default"},
+          {t: "option", value: "vim", text: "vim"},
+          {t: "option", value: "emacs", text: "emacs"},
+        ]},
+        {c: "show-graphs", text: "save", click: doSave},
         {c: "show-graphs", text: "compile and run", click: compileAndRun},
         {c: "show-graphs", text: "show compile", click: toggleGraphs}
       ]},
@@ -736,47 +996,7 @@ function drawNodeGraph() {
     errors,
     program,
   ]};
-  renderer.render([{c: "graph-root", children: [root]}]);
-}
-
-//---------------------------------------------------------
-// Draw AST
-//---------------------------------------------------------
-
-function drawAST(root, state) {
-  let children = [];
-  let node = {c: "ast-node", children: [
-    {c: "ast-type", text: root.type},
-    {c: "ast-children", children}
-  ]}
-  if(root.children) {
-    for(let child of root.children) {
-      children.push(drawAST(child, state));
-    }
-  }
-  return node;
-}
-
-//---------------------------------------------------------
-// Draw parse
-//---------------------------------------------------------
-
-function drawParse(root, state) {
-  let children = [];
-  let node = {c: "parse-node", children: [
-    {c: "parse-type", text: root.type},
-    {c: "parse-children", children}
-  ]}
-  if(root.type == "code") {
-    for(let child of root.children) {
-      children.push(drawParse(child, state));
-    }
-  } else if(root.type == "query") {
-    for(let object of root.objects) {
-      children.push(drawParse(object, state));
-    }
-  }
-  return node;
+  renderer.render([{c: "graph-root", children: [rootUi]}]);
 }
 
 //---------------------------------------------------------
@@ -904,7 +1124,7 @@ function clone(obj) {
   if(typeof obj !== "object") return obj;
   if(obj.constructor === Array) {
     let neue = [];
-    for(let ix of obj) {
+    for(let ix = 0; ix < obj.length; ix++) {
       neue[ix] = clone(obj[ix]);
     }
     return neue;
@@ -920,19 +1140,17 @@ function clone(obj) {
 //---------------------------------------------------------
 // Connect the websocket, send the ui code
 //---------------------------------------------------------
-
+let DEBUG = false;
 let __entities = {}; // DEBUG
 
 var socket = new WebSocket("ws://" + window.location.host +"/ws");
 socket.onmessage = function(msg) {
-  console.time("PARSE");
   let data = JSON.parse(msg.data);
-  console.timeEnd("PARSE");
   if(data.type == "result") {
     handleDOMUpdates(data);
 
     let diffEntities = 0;
-    if(__entities) {
+    if(DEBUG && __entities) {
       for(let [e, a, v] of data.remove) {
         if(!__entities[e]) continue;
         let entity = __entities[e];
@@ -967,19 +1185,24 @@ socket.onmessage = function(msg) {
         }
       }
     }
-
-    console.groupCollapsed(`Received Result +${data.insert.length}/-${data.remove.length} (∂Entities: ${diffEntities})`);
-    console.table(data.insert);
-    console.table(data.remove);
-    if(__entities) console.log(clone(__entities));
-    console.groupEnd();
+    if(DEBUG) {
+      console.groupCollapsed(`Received Result +${data.insert.length}/-${data.remove.length} (∂Entities: ${diffEntities})`);
+      console.table(data.insert);
+      console.table(data.remove);
+      if(__entities) console.log(clone(__entities));
+      console.groupEnd();
+    }
     drawNodeGraph();
 
   } else if(data.type == "node_graph") {
     allNodeGraphs[data.head] = data.nodes;
   } else if(data.type == "full_parse") {
-    indexParse(data.parse);
+    activeParse = indexParse(data.parse);
     drawNodeGraph();
+    handleEditorParse(activeParse);
+  } else if(data.type == "parse") {
+    editorParse = indexParse(data.parse);
+    handleEditorParse(editorParse);
 
   } else if(data.type == "node_times") {
     activeParse.iterations = data.iterations;
@@ -997,6 +1220,7 @@ socket.onmessage = function(msg) {
 }
 socket.onopen = function() {
   console.log("Connected to eve server!");
+  onHashChange({});
 }
 socket.onclose = function() {
   console.log("Disconnected from eve server!");

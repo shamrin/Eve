@@ -1,5 +1,4 @@
 #include <runtime.h>
-#include <unix/unix.h>
 #include <http/http.h>
 #include <bswap.h>
 
@@ -12,6 +11,7 @@ typedef struct websocket {
     buffer_handler client;
     buffer_handler write;
     timer keepalive;
+    reader self;
 } *websocket;
 
 typedef enum {
@@ -58,64 +58,79 @@ void websocket_output_frame(websocket w, buffer b, thunk t)
     websocket_send(w, 1, b, t);
 }
 
-static CONTINUATION_1_2(websocket_input_frame, websocket, buffer, thunk);
-static void websocket_input_frame(websocket w, buffer b, thunk t)
+static CONTINUATION_1_2(websocket_input_frame, websocket, buffer, register_read);
+static void websocket_input_frame(websocket w, buffer b, register_read reg)
 {
-    int offset = 2;
+    int rlen;
 
     if (!b) {
+        prf ("websocket close\n");
         apply(w->client, 0, ignore);
         return;
     }
 
-    // there is a better approach here, chained buffers, or at least assuming it will fit
+    // there is a better approach here, chained buffers, incremental delivery, etc
     buffer_append(w->reassembly, bref(b, 0), buffer_length(b));
-    int rlen = buffer_length(w->reassembly);
-    if (rlen < offset) return;
-
-    u64 length = *(u8 *)bref(w->reassembly, 1) & 0x7f;
-
-    if (length == 126) {
-        if (rlen < 4) return;
-        length = htons(*(u16 *)bref(w->reassembly, 2));
-        offset += 2;
-    } else {
-        if (length == 127) {
-            // ok, we are throwing away the top byte, who the hell thought
-            // that 1TB wasn't enough per object
-            if (rlen< 10) return;
-            length = htonll(*(u64 *)bref(w->reassembly, 2));
-            offset += 8;
-        }
-    }
-    
-    int opcode = *(u8 *)bref(w->reassembly, 0) & 0xf;
-    
-    u32 mask = 0;
-    // which should always be the case for client streams
-    if (*(u8 *)bref(w->reassembly, 1) & 0x80) {
-        mask = *(u32 *)bref(w->reassembly, offset);
-        offset += 4;
-    }
-
-    if ((rlen - offset) >= length) {
-        if (mask) {
-            for (int i=0;i<((length +3)/4); i++) {
-                // xxx - fallin off the end 
-                *(u32 *)bref(w->reassembly, offset + i * 4) ^= mask;
+    while ((rlen = buffer_length(w->reassembly)) > 0) {
+        int offset = 2;
+        if (rlen < offset) goto end;
+        long length = *(u8 *)bref(w->reassembly, 1) & 0x7f;
+        
+        if (length == 126) {
+            if (rlen < 4) goto end;
+            length = htons(*(u16 *)bref(w->reassembly, 2));
+            offset += 2;
+        } else {
+            if (length == 127) {
+                // ok, we are throwing away the top byte, who the hell thought
+                // that 1TB wasn't enough per object
+                if (rlen< 10) goto end;
+                length = htonll(*(u64 *)bref(w->reassembly, 2));
+                offset += 8;
             }
         }
-        // xxx - only deliver this message
-        // compress reassembly buffer
+        
+        int opcode = *(u8 *)bref(w->reassembly, 0) & 0xf;
+        if (opcode == ws_close) { 
+            apply(w->client, 0, ignore);
+            return;
+        }
+        
+        u32 mask = 0;
+        // which should always be the case for client streams
+        if (*(u8 *)bref(w->reassembly, 1) & 0x80) {
+            mask = *(u32 *)bref(w->reassembly, offset);
+            offset += 4;
+        }
+
+        if ((rlen - offset) < length) goto end;
 
         w->reassembly->start += offset;
+
+        if (mask) {
+            for (int i=0; i<length; i++) {
+                // xxx -figure out how to apply this a word at a time
+                *(u8 *)bref(w->reassembly, i) ^= (mask>>((i&3)*8)) & 0xff;
+            }
+        }
+
         switch(opcode) {
+        case ws_continuation:
+            prf("wth continuation\n");
+            break;
         case ws_text:
         case ws_binary:
-            apply(w->client,  w->reassembly, t);
-            break;
+            {
+                buffer out = w->reassembly;
+                if (buffer_length(w->reassembly) > length) {
+                    // leak?
+                    out = wrap_buffer(w->h, bref(w->reassembly, 0), length);
+                }
+                apply(w->client, out, ignore);
+                break;
+            }
         case ws_ping:
-            websocket_send(w, ws_pong, w->reassembly, t);
+            websocket_send(w, ws_pong, w->reassembly, ignore);
             break;
         case ws_close:
         case ws_pong:
@@ -124,32 +139,33 @@ static void websocket_input_frame(websocket w, buffer b, thunk t)
             prf("invalid ws frame %d\n", opcode);
         }
         w->reassembly->start += length;
-
-        if((w->reassembly->start = w->reassembly->end)) {
+        if (w->reassembly->start == w->reassembly->end) {
             buffer_clear(w->reassembly);
         }
     }
-    apply(t);
+ end:
+    // i think we're responsible for freeing this buffer
+    apply(reg, w->self);
 }
 
 void sha1(buffer d, buffer s);
 
 buffer_handler websocket_send_upgrade(heap h,
-                                      table headers,
+                                      bag b, 
+                                      uuid n,
                                       buffer_handler down,
                                       buffer_handler up,
-                                      buffer_handler *from_above)
+                                      register_read reg)
 {
     websocket w = allocate(h, sizeof(struct websocket));
     estring ekey;
     string key;
 
-    if (!(ekey=table_find(headers, intern_buffer(sstring("Sec-WebSocket-Key"))))) {
+    if (!(ekey=lookupv(b, n, sym(Sec-WebSocket-Key)))) {
         // something tasier
         return 0;
     } 
 
-    // sad
     key = allocate_buffer(h, ekey->length);
     buffer_append(key, ekey->body, ekey->length);
     
@@ -163,17 +179,18 @@ buffer_handler websocket_send_upgrade(heap h,
     buffer sh = allocate_buffer(h, 20);
     sha1(sh, key);
     string r = base64_encode(h, sh);
-    buffer b = allocate_buffer(h, 200);
+    buffer upgrade = allocate_buffer(h, 200);
 
-    outline(b, "HTTP/1.1 101 Switching Protocols");
-    outline(b, "Upgrade: websocket");
-    outline(b, "Connection: Upgrade");
-    outline(b, "Sec-WebSocket-Accept: %b", r);
-    outline(b, "");
+    outline(upgrade, "HTTP/1.1 101 Switching Protocols");
+    outline(upgrade, "Upgrade: websocket");
+    outline(upgrade, "Connection: Upgrade");
+    outline(upgrade, "Sec-WebSocket-Accept: %b", r);
+    outline(upgrade, "");
 
     register_periodic_timer(seconds(5), cont(w->h, send_keepalive, w, allocate_buffer(w->h, 0)));
-    apply(w->write, b, ignore);
-    *from_above = cont(h, websocket_output_frame,w);
-    return(cont(h, websocket_input_frame, w));
+    apply(w->write, upgrade, ignore);
+    w->self = cont(h, websocket_input_frame, w);
+    apply(reg, w->self);
+    return(cont(h, websocket_output_frame, w));
 }
 

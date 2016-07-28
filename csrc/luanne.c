@@ -1,5 +1,4 @@
 #include <runtime.h>
-#include <unix/unix.h>
 #include <luanne.h>
 
 static char *luat(lua_State *L, int index)
@@ -71,6 +70,13 @@ static int construct_register(lua_State *L)
     int offset = (int)lua_tonumber(L, 1);
     lua_pushlightuserdata(L, (void *)(register_base + offset));
     return 1;
+}
+
+static int node_id(lua_State *L)
+{
+    node n = lua_touserdata(L, 1);
+    lua_pushnumber(L, (int)*((double *)n->id));
+    return (1);
 }
 
 static int construct_number(lua_State *L)
@@ -162,20 +168,23 @@ vector lua_compile_eve(interpreter c, heap h, buffer b, boolean tracing, buffer 
     lua_pushlstring(c->L, bref(b, 0), buffer_length(b));
     lua_pushboolean(c->L, tracing);
 
-    if (lua_pcall(c->L, 2, 3, lua_gettop(c->L)-4)) {
+    if (lua_pcall(c->L, 2, 2, lua_gettop(c->L)-4)) {
         printf ("lua error\n");
         printf ("%s\n", lua_tostring(c->L, -1));
     }
-    foreach_lua_table(c->L, -3, k, v) {
-        compiled n = allocate(h, sizeof(struct compiled));
-        n->head = (void *)lua_topointer(c->L, v);
-        vector_insert(result, n);
-    }
-    *out = lua_to_buffer(c->L, -2, h);
+    
+    *out = lua_to_buffer(c->L, -1, h);
     int count = 0;
-    foreach_lua_table(c->L, -1, k, v) {
-        compiled n = vector_get(result, count++);
-        n->name = lua_to_buffer(c->L, v, h);
+    foreach_lua_table(c->L, -2, k, v) {
+        compiled n = allocate(c->h, sizeof(struct compiled));
+        foreach_lua_table(c->L, v, k0, v0) {
+            value kv = lua_tovalue(c->L, k0);
+            // xxx - do we have a direct extract?
+            if (kv == sym(name)) n->name = lua_tovalue(c->L, v0);
+            if (kv == sym(regs)) n->regs = (int)lua_tonumber(c->L, v0);
+            if (kv == sym(head)) n->head = lua_tovalue(c->L, v0);
+        }
+        vector_insert(result, n);
     }
     lua_pop(c->L, 1);
     return(result);
@@ -212,33 +221,46 @@ void lua_run(interpreter c, buffer b)
 
 extern int luaopen_utf8(lua_State *L);
 
-
 extern void bundle_add_loaders(lua_State* L);
+
+vector vector_from_lua(heap h, lua_State *L, int index)
+{
+    vector res = allocate_vector(h, 5);
+    foreach_lua_table(L, index, _, v) 
+        vector_insert(res, lua_tovalue(L, v));
+    return res;
+}
+
 
 int lua_build_node(lua_State *L)
 {
     interpreter c = lua_context(L);
     node n = allocate(c->h, sizeof(struct node));
-    n->arms = allocate_vector(c->h, 5);
-    n->arguments = allocate_vector(c->h, 5);
     estring x = lua_tovalue(L, 1);
     n->type = x;
     n->builder = table_find(builders_table(),x) ;
+
     if (!n->builder) {
         prf ("no such node type: %v\n", x);
     }
 
-    foreach_lua_table(L, 2, _, v) {
-        vector_insert(n->arms, (void *)lua_topointer(L, v));
+    n->arms = vector_from_lua(c->h, L, 2);
+    n->arguments = create_value_table(c->h);
+    n->display = create_value_table(c->h);
+
+    foreach_lua_table(L, 3, k, v)  {
+        table_set(n->arguments, lua_tovalue(c->L, k),
+                     (lua_type(L, v) == LUA_TTABLE)?
+                  vector_from_lua(c->h, L, v):
+                  lua_tovalue(L, v));
+        
+        table_set(n->display,lua_tovalue(c->L, k),
+                  (lua_type(L, v) == LUA_TTABLE)?
+                  aprintf(c->h,"%V", vector_from_lua(c->h, L, v)):
+                  aprintf(c->h,"%r", lua_tovalue(L, v)));
     }
 
-    foreach_lua_table(L, 3, p, v) {
-        vector s = allocate_vector(c->h, 5);
-        vector_insert(n->arguments, s);
-        foreach_lua_table(L, v, z, a) {
-            vector_insert(s, lua_tovalue(L, a));
-        }
-    }
+    // xxx - shouldn't really be a value
     value node_id = lua_tovalue(L, 4);
     n->id = node_id;
 
@@ -267,6 +289,7 @@ interpreter build_lua()
     define(c, "sstring", construct_string);
     define(c, "value_to_string", lua_print_value);
     define(c, "build_node", lua_build_node);
+    define(c, "node_id", node_id);
     require_luajit(c, "compiler");
     return c;
 }
