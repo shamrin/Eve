@@ -141,7 +141,6 @@ struct evaluation  {
     thunk run;
     ticks cycle_time;
     table f_bags;
-    int t_delta_count;
     block bk;
 };
 
@@ -160,4 +159,8 @@ void run_solver(evaluation s);
 void inject_event(evaluation, buffer b, boolean);
 void block_close(block);
 
+void init_request_service(bag b);
+
 #include <edb.h>
+
+typedef closure(bag_handler, evaluation, bag);

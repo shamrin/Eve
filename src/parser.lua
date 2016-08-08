@@ -162,16 +162,17 @@ local numeric = {["0"] = true, ["1"] = true, ["2"] = true, ["3"] = true,
                  ["8"] = true, ["9"] = true}
 
 local keywords = {
-  freeze = "FREEZE",
-  maintain = "MAINTAIN",
+  commit = "COMMIT",
+  bind = "BIND",
+  match = "MATCH",
+  ["```"] = "BLOCK",
   ["if"] = "IF",
   ["then"] = "THEN",
   ["else"] = "ELSE",
   ["or"] = "OR",
   ["not"] = "NOT",
+  is = "IS",
   none = "NONE",
-  given = "GIVEN",
-  per = "PER",
   ["true"] = "BOOLEAN",
   ["false"] = "BOOLEAN",
   ["="] = "EQUALITY",
@@ -187,9 +188,11 @@ local keywords = {
   ["+="] = "INSERT",
   ["-="] = "REMOVE",
   [":="] = "SET",
+  ["<-"] = "MERGE",
 }
 
 local whitespace = { [" "] = true, ["\n"] = true, ["\t"] = true, ["\r"] = true }
+local queryKeywords = {match = true, bind = true, commit = true}
 
 local function isIdentifierChar(char, prev)
   return not specials[char] and not whitespace[char] and not (prev == "/" and char == "/")
@@ -218,6 +221,7 @@ local function lex(str)
   local offset = 0
   local byteOffset = 0
   local surrogateOffset = 0
+  local inBlock = nil
   local tokens = {}
 
   local function adjustOffset(num)
@@ -243,12 +247,19 @@ local function lex(str)
         adjustOffset(1)
       end
 
-    -- anything at root level is just documentation
-    elseif offset == 0 then
+    elseif not inBlock then
       scanner:unread()
-      local doc = scanner:eatWhile(notNewline)
-      tokens[#tokens+1] = Token:new("DOC", doc, line, offset, byteOffset, surrogateOffset)
-      adjustOffsetByString(doc)
+      local firstToken = scanner:eatWhile(isIdentifierChar)
+      -- check if this is a keyword that continues a query
+      if firstToken == "```" then
+        inBlock = true
+        tokens[#tokens+1] = Token:new("BLOCK_OPEN", firstToken, line, offset, byteOffset, surrogateOffset)
+        adjustOffsetByString(firstToken)
+      else
+        local doc = scanner:eatWhile(notNewline)
+        tokens[#tokens+1] = Token:new("DOC", firstToken .. doc, line, offset, byteOffset, surrogateOffset)
+        adjustOffsetByString(doc)
+      end
 
     elseif char == "\"" or (char == "}" and scanner:peek() == "}") then
       if char == "\"" then
@@ -268,10 +279,11 @@ local function lex(str)
       if #string > 0 then
         -- single slashes are only escape codes and shouldn't make it to the
         -- actual string
+        original = string
         string = string:gsub("\\n", "\n"):gsub("\\([^\\])", "%1")
         tokens[#tokens+1] = Token:new("STRING", string, line, offset, byteOffset, surrogateOffset)
+        adjustOffsetByString(original)
       end
-      adjustOffsetByString(string)
       -- skip the end quote
       if scanner:peek() == "\"" then
         scanner:read()
@@ -326,8 +338,13 @@ local function lex(str)
         scanner:unread()
         identifier = identifier:sub(1, -2)
       end
+
       local keyword = keywords[identifier]
       local type = keyword or "IDENTIFIER"
+      if identifier == "```" then
+        inBlock = false
+        type = "BLOCK_CLOSE"
+      end
       tokens[#tokens+1] = Token:new(type, identifier, line, offset, byteOffset, surrogateOffset)
       adjustOffsetByString(identifier)
     end
@@ -395,7 +412,7 @@ local function formatNode(node, depth)
       string = string .. childIndent .. color.dim("projection: ")
       for _, proj in pairs(v) do
         for var in pairs(proj) do
-          string = string .. var.name .. ", "
+          string = string .. (var.name or "unnamed") .. ", "
         end
       end
        string = string .. "\n"
@@ -459,7 +476,7 @@ local function formatQueryGraph(root, seen, depth)
       string = string .. childIndent .. color.dim("projection: ")
       for _, proj in pairs(v) do
         for var in pairs(proj) do
-          string = string .. var.name .. ", "
+          string = string .. (var.name or "unnamed") .. ", "
         end
       end
       string = string .. "\n"
@@ -505,9 +522,10 @@ local function makeNode(context, type, token, rest)
 end
 
 local valueTypes = {IDENTIFIER = true, infix = true, ["function"] = true, NUMBER = true, STRING = true, block = true, attribute = true, BOOLEAN = true}
-local infixTypes = {equality = true, infix = true, attribute = true, mutate = true, inequality = true, DOT = true, SET = true, REMOVE = true, INSERT = true, INFIX = true, EQUALITY = true, ALIAS = true, INEQUALITY = true}
+local infixTypes = {equality = true, infix = true, attribute = true, mutate = true, inequality = true, DOT = true, SET = true, REMOVE = true, INSERT = true, MERGE = true, INFIX = true, EQUALITY = true, ALIAS = true, INEQUALITY = true}
 local infixPrecedents = {equality = 0, inequality = 0, mutate = 0, attribute = 4, block = 4, ["function"] = 4, ["^"] = 3, ["*"] = 2, ["/"] = 2, ["+"] = 1, ["-"] = 1 }
 local singletonTypes = {outputs = true}
+local positionalFunctions = { [">"] = true, ["<"] = true, [">="] = true, ["<="] = true, ["!="] = true, ["+"] = true, ["-"] = true, ["*"] = true, ["/"] = true, concat = true, is = true}
 local alphaFields = {"a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m", "n", "o"}
 
 local function nextNonComment(scanner, context)
@@ -553,20 +571,19 @@ local function parse(tokens, context)
     local type = token.type
     local next = nextNonComment(scanner, context)
 
-    -- we have to handle close parens before we do anything else, to make sure
+    -- we have to handle close parens/brackets before we do anything else, to make sure
     -- that the top of the stack is properly closed *before* we might add new
     -- infixes onto it.
-    if type == "CLOSE_PAREN" then
+    if type == "CLOSE_PAREN" or type == "CLOSE_BRACKET" then
       local stackType = stackTop.type
-      if (stackType == "block" or stackType == "function" or stackType == "grouping"
-                      or stackType == "projection" or (stackTop.parent and stackTop.parent.type == "not")) then
+      if type == "CLOSE_PAREN" and (stackType == "block" or stackTop.func == "is" or (stackTop.parent and stackTop.parent.type == "not")) then
         stackTop.closed = true
-        -- this also closes out the containing function in the case of aggregate
-        -- modifiers
-        if stackType == "projection" or stackType == "grouping" then
-          stack[#stack - 1].closed = true
-        end
-      else
+      elseif type == "CLOSE_BRACKET" and (stackType == "function" or stackType == "object") then
+        stackTop.closed = true
+      elseif type == "CLOSE_BRACKET" then
+        -- error
+        errors.invalidCloseBracket(context, token, stack)
+      elseif type == "CLOSE_PAREN" then
         -- error
         errors.invalidCloseParen(context, token, stack)
       end
@@ -585,7 +602,7 @@ local function parse(tokens, context)
       elseif next.type == "EQUALITY" or next.type == "ALIAS" or next.type == "INEQUALITY" then
         local nodeType = next.type == "INEQUALITY" and "inequality" or "equality"
         nextInfix = makeNode(context, nodeType, next, {operator = next.value, children = {}})
-      elseif next.type == "INSERT" or next.type == "REMOVE" or next.type == "SET" then
+      elseif next.type == "INSERT" or next.type == "REMOVE" or next.type == "SET" or next.type == "MERGE" then
         nextInfix = makeNode(context, "mutate", next, {operator = next.type:lower(), children = {}})
       else
         -- error? how could we get here?
@@ -643,6 +660,19 @@ local function parse(tokens, context)
         stack:push(makeNode(context, "query", token, {doc = token.value, children = {}}))
       end
 
+    elseif type == "BLOCK_OPEN" or type == "BLOCK_CLOSE" then
+      -- we don't really need to do anything with these
+
+    elseif type == "MATCH" then
+      -- TODO: we should only be looking at other token types if we've opened the
+      -- query..
+      if stackTop.type == "query" and #stackTop.children == 0 then
+        stackTop.opened = true;
+      else
+        -- error - match is only valid as the opening to a query
+        errors.misplacedMatch(context, token, stackTop)
+      end
+
     elseif type == "COMMA" then
       -- we treat commas as whitespace
 
@@ -650,10 +680,10 @@ local function parse(tokens, context)
       context.comments[#context.comments + 1] = token
 
     elseif type == "STRING_OPEN" then
-      stack:push(makeNode(context, "function", token, {func = "concat", children = {right}}))
+      stack:push(makeNode(context, "function", token, {func = "concat", children = {}, concatBlock = true}))
 
     elseif type == "STRING_CLOSE" then
-      if stackTop.type == "function" and stackTop.func == "concat" then
+      if stackTop.concatBlock then
         -- if there's zero or one children, then this concat isn't needed
         if #stackTop.children == 0 or (#stackTop.children == 1 and stackTop.children[1].type == "STRING") then
           local str = stackTop.children[1] or makeNode(context, "STRING", token, {value = ""})
@@ -664,6 +694,9 @@ local function parse(tokens, context)
           stackTop.closed = true
         end
       else
+        for ix, top in ipairs(stack) do
+          print(ix, formatNode(top))
+        end
         -- error
         errors.string_close(context, token, stackTop and stackTop.type)
       end
@@ -671,7 +704,7 @@ local function parse(tokens, context)
     elseif type == "OPEN_CURLY" or type == "CLOSE_CURLY" then
       -- we can just ignore these as long as we're in a concat
       -- if we're not, it's an error
-      if stackTop.func ~= "concat" then
+      if not stackTop.concatBlock then
         -- error
         errors.curlyOutsideOfString(context, token, stackTop)
       end
@@ -680,19 +713,14 @@ local function parse(tokens, context)
       stack:push(makeNode(context, "object", token, {children = {}}))
 
     elseif type == "CLOSE_BRACKET" then
-      if stackTop.type ~= "object" then
-        -- error
-        errors.invalidCloseBracket(context, token, stack)
-      else
-        stackTop.closed = true
-      end
+      -- handled above
 
-    elseif type == "FREEZE" or type == "MAINTAIN" then
+    elseif type == "COMMIT" or type == "BIND" then
       local update = makeNode(context, "update", token, {scope = "session", children = {}})
-      if type == "MAINTAIN" then
+      if type == "BIND" then
         update.scope = "event"
-      elseif next and (next.value == "all" or next.value == "event") then
-        update.scope = next.value
+      elseif next and (next.value == "global" or next.value == "event") then
+        update.scope = next.value == "event" and next.value or "all"
         -- eat that token
         scanner:read()
         -- @TODO: handle specifying a custom bag
@@ -800,25 +828,15 @@ local function parse(tokens, context)
     elseif type == "CLOSE_PAREN" then
       -- handled above
 
-    elseif type == "IDENTIFIER" and next and next.type == "OPEN_PAREN" then
+    elseif type == "IS" and next and next.type == "OPEN_PAREN" and next.offset == token.offset + token.length then
       stack:push(makeNode(context, "function", token, {func = token.value, children = {}}))
       -- consume the paren
       scanner:read()
 
-    elseif type == "GIVEN" or type == "PER" then
-      if stackTop.type == "function" or stackTop.type == "grouping" or stackTop.type == "projection" then
-        -- if we are currently working on one of the other modifiers, we're
-        -- done with that one and should clean it out
-        if stackTop.type == "grouping" or stackTop.type == "projection" then
-          stackTop.closed = true
-          tryFinishExpression()
-        end
-        local modifier = type == "GIVEN" and "projection" or "grouping"
-        stack:push(makeNode(context, modifier, token, {children = {}}))
-      else
-        -- error
-        errors.invalidAggregateModifier(context, token, stackTop)
-      end
+    elseif type == "IDENTIFIER" and next and next.type == "OPEN_BRACKET" and next.offset == token.offset + token.length then
+      stack:push(makeNode(context, "function", token, {func = token.value, children = {}}))
+      -- consume the paren
+      scanner:read()
 
     elseif type == "IDENTIFIER" or type == "NUMBER" or type == "STRING" or type == "UUID" or type == "BOOLEAN" then
       stackTop.children[#stackTop.children + 1] = token
@@ -886,38 +904,128 @@ local function generateBindingNode(context, node, related, parent)
   return node
 end
 
-local function resolveMutate(context, node)
-  local left = resolveExpression(node.children[1], context)
-  local rightNode = node.children[2]
-  -- we have to distinguish between objects and any other kind
-  -- of expression on the right here. Objects should still be
-  -- mutating, but other expressions should not. If we don't do
-  -- this then attribute lookups with . syntax will incorrectly
-  -- end up being mutates
-  local right
-  if rightNode.type == "object" then
-    -- if our left is an attribute call then we need to add the
-    -- attribute's parent to our projection to make sure that
-    -- the generated object is per each parent not just potentially
-    -- one global one
-    if left.attributeLeft then
-      context.projections:push(Set:new({left.attributeLeft}))
+local function resolveMutateMerge(context, left, rightNode)
+  -- Merges generally just set all the attributes in the rightNode
+  -- on the entity represented by the left, but that leads to weird
+  -- behavior for tags and names, where you don't think that merging
+  -- in #foo would remove #bar. To fix this, we go through the rightNode
+  -- find all TAG and NAME children and remove them. We then add those
+  -- to an "insert" mutate that does the right thing.
+  local adds = {}
+  local safe = {}
+  for _, value in ipairs(rightNode.children) do
+    if value.type == "equality" and (value.children[1].type == "TAG" or value.children[1].type == "NAME") then
+      adds[#adds + 1] = value
     else
-      -- either way we need to mutate per each thing on the left
-      context.projections:push(Set:new({left}))
+      safe[#safe + 1] = value
     end
-    right = resolveExpression(rightNode, context)
-    -- cleanup our projection
-    context.projections:pop()
+  end
+  if #adds > 0 then
+    context.mutateOperator = "insert"
+    local rightAddMutate = makeNode(context, "object", rightNode, {children = adds})
+    resolveExpression(makeNode(context, "equality", rightNode, {operator = "=", children = {left, rightAddMutate}}), context);
+    context.mutateOperator = "merge"
+  end
+  rightNode.children = safe
+  right = resolveExpression(rightNode, context)
+  return right
+end
+
+local function resolveMutate(context, node)
+  local leftNode = node.children[1]
+  local rightNode = node.children[2]
+  local right, left
+
+  if leftNode.type == "attribute" then
+    -- valid constructions:
+    -- foo.zomg (+|-|:)= expression
+    -- foo.zomg <- [ ... ]
+    if node.operator == "merge" then
+      -- in the case of a merge with the left being an attribute
+      -- lookup, we need to find all the values of that attribute
+      -- and then attempt to merge the right object into them. As
+      -- such, we're not actually mutating the left side, we're just
+      -- doing a normal lookup
+      local prevMutating = context.mutating;
+      context.mutating = nil
+      left = resolveExpression(leftNode, context)
+      context.mutating = prevMutating
+      if rightNode.type == "object" then
+        context.projections:push(Set:new({left}))
+        right = resolveMutate(context, left, rightNode)
+        context.projections:pop()
+      else
+        -- error merge must be followed by an object
+        errors.mergeWithoutObject(context, node, rightNode)
+      end
+
+    else
+      left = resolveExpression(leftNode, context)
+      -- we have to distinguish between objects and any other kind
+      -- of expression on the right here. Objects should still be
+      -- mutating, but other expressions should not. If we don't do
+      -- this then attribute lookups with . syntax will incorrectly
+      -- end up being mutates
+      if rightNode.type == "object" then
+        -- if our left is an attribute call then we need to add the
+        -- attribute's parent to our projection to make sure that
+        -- the generated object is per each parent not just potentially
+        -- one global one
+        context.projections:push(Set:new({left.attributeLeft}))
+        right = resolveExpression(rightNode, context)
+        -- cleanup our projection
+        context.projections:pop()
+      else
+        local prevMutating = context.mutating;
+        context.mutating = nil
+        right = resolveExpression(rightNode, context)
+        context.mutating = prevMutating
+      end
+
+    end
+
+  elseif leftNode.type == "IDENTIFIER" then
+    left = resolveExpression(leftNode, context)
+    -- valid constructions:
+    -- foo (+|-)= (#|@)bar
+    -- foo := none
+    -- foo <- [ ... ]
+    if node.operator == "set" then
+      if rightNode.type == "NONE" then
+        -- TODO
+      else
+        -- error the only valid thing to set a reference to directly
+        -- is none
+        errors.setWithoutNone(context, node, rightNode)
+      end
+    elseif node.operator == "merge" then
+      if rightNode.type == "object" then
+        context.projections:push(Set:new({left}))
+        right = resolveMutateMerge(context, left, rightNode)
+        context.projections:pop()
+      else
+        -- error merge must be followed by an object
+        errors.mergeWithoutObject(context, node, rightNode)
+      end
+
+    elseif rightNode.type == "equality" and (rightNode.children[1].type == "NAME" or rightNode.children[1].type == "TAG") then
+      local object = makeNode(context, "object", node, {children = {rightNode}})
+      right = resolveExpression(object, context)
+    else
+      -- error, the only valid thing after +=/-= for a reference is tags or names
+      errors.referenceMutateWithoutTagOrName(context, node, rightNode)
+    end
+
   else
-    local prevMutating = context.mutating;
-    context.mutating = nil
-    right = resolveExpression(rightNode, context)
-    context.mutating = prevMutating
+    -- error, the only things we can have on the left of
+    -- a mutate are identifiers and attribute calls
+    errors.invalidMutateLeft(context, node, leftNode)
   end
   -- we need to create an equality between whatever the left resolved to
   -- and whatever the right resolved to
-  resolveExpression(makeNode(context, "equality", node, {operator = "=", children = {left, right}}), context);
+  if right then
+    resolveExpression(makeNode(context, "equality", node, {operator = "=", children = {left, right}}), context);
+  end
   return left
 end
 
@@ -1002,48 +1110,84 @@ local function resolveFunctionLike(context, node)
   generateBindingNode(context, {field = "return", variable = resultVar}, resultVar, expression)
   -- create bindings
   for ix, child in ipairs(node.children) do
-    local field = alphaFields[ix]
     local prevMutating = context.mutating;
     context.mutating = nil
-    local resolved = resolveExpression(child, context)
-    context.mutating = prevMutating
-    if not resolved then
+    local field, right
+    if positionalFunctions[node.func] then
+      field = alphaFields[ix]
+      right = child
+    elseif child.type == "equality" and child.children[1].type == "IDENTIFIER" then
+      field = child.children[1].value
+      right = child.children[2]
+    elseif child.type == "IDENTIFIER" then
+      field = child.value
+      right = child
+    else
       -- error
       errors.invalidFunctionArgument(context, child, node.type)
+    end
+    if field then
+      local resolved = resolveExpression(right, context)
+      if not resolved then
+        -- error
+        errors.invalidFunctionArgument(context, child, node.type)
 
-    elseif resolved.type == "variable" then
-      generateBindingNode(context, {field = field, variable = resolved}, resolved, expression)
-
-    elseif resolved.type == "constant" then
-      generateBindingNode(context, {field = field, constant = resolved}, resolved, expression)
-
-    elseif resolved.type == "grouping" then
-      expression.groupings = {}
-      for ix, grouping in ipairs(resolved.children) do
-        local groupingVar = resolveExpression(grouping, context)
-        if groupingVar.type == "variable" then
-          expression.groupings[#expression.groupings + 1] = makeNode(context, "grouping", grouping, {expression = expression, variable = groupingVar, ix = ix})
-        else
-          -- error
-          errors.invalidGrouping(context, grouping)
+      elseif field == "per" then
+        local groupings = resolved.children or {resolved}
+        expression.groupings = expression.groupings or {}
+        for ix, grouping in ipairs(groupings) do
+          local groupingVar = resolveExpression(grouping, context)
+          if groupingVar.type == "variable" then
+            expression.groupings[#expression.groupings + 1] = makeNode(context, "grouping", grouping, {expression = expression, variable = groupingVar, ix = ix})
+          else
+            -- error
+            errors.invalidGrouping(context, grouping)
+          end
         end
-      end
 
-    elseif resolved.type == "projection" then
-      expression.projection = {}
-      for _, project in ipairs(resolved.children) do
-        local projectVar = resolveExpression(project, context)
-        if projectVar.type == "variable" then
-          expression.projection[#expression.projection + 1] = makeNode(context, "projection", project, {expression = expression, variable = projectVar})
-        else
-          -- error
-          errors.invalidProjection(context, grouping)
+      elseif field == "given" then
+        local projections = resolved.children or {resolved}
+        expression.projection = expression.projection or {}
+        for _, project in ipairs(projections) do
+          local projectVar = resolveExpression(project, context)
+          if projectVar.type == "variable" then
+            local foo = makeNode(context, "projection", project, {expression = expression, variable = projectVar})
+            expression.projection[#expression.projection + 1] = foo
+          else
+            -- error
+            errors.invalidProjection(context, project)
+          end
         end
+
+      elseif resolved.type == "variable" then
+        generateBindingNode(context, {field = field, variable = resolved}, resolved, expression)
+
+      elseif resolved.type == "constant" then
+        generateBindingNode(context, {field = field, constant = resolved}, resolved, expression)
+
+      elseif resolved.type == "block" then
+        for _, rawValue in ipairs(resolved.children) do
+          local value = resolveExpression(rawValue, context)
+          if value.type == "variable" then
+            generateBindingNode(context, {field = field, variable = value}, value, expression)
+          elseif value.type == "constant" then
+            generateBindingNode(context, {field = field, constant = value}, value, expression)
+          else
+            errors.invalidFunctionArgument(context, value, node.type)
+          end
+        end
+
+      else
+        -- error?
+        errors.invalidFunctionArgument(context, child, node.type)
       end
     else
-      -- error?
+      -- error - only identifiers are allowed as the left hand side of function
+      -- argument equalities
       errors.invalidFunctionArgument(context, child, node.type)
     end
+    -- set back to whatever prevMutating was
+    context.mutating = prevMutating
   end
   if node.func == "is" then
     context.nonFilteringInequality = prevNonfiltering
@@ -1092,14 +1236,11 @@ resolveExpression = function(node, context)
   elseif node.type == "infix" or node.type == "function" then
     return resolveFunctionLike(context, node)
 
-  elseif node.type == "grouping" or node.type == "projection" then
-    return node
-
   elseif node.type == "block" then
     if #node.children == 1 then
       return resolveExpression(node.children[1], context)
     else
-      -- error invalid block
+      return node
     end
 
   else
@@ -1133,6 +1274,7 @@ generateObjectNode = function(root, context)
     for _, projection in ipairs(context.projections) do
       object.projection[#object.projection + 1] = projection
     end
+    object.idProvider = context.idProvider
   end
 
   -- create a binding to this node's entity field
@@ -1346,6 +1488,10 @@ generateObjectNode = function(root, context)
   -- so let's clean them up
   context.projections:pop()
 
+  if object.operator == "merge" then
+    object.operator = "set"
+  end
+
   return object
 end
 
@@ -1428,7 +1574,9 @@ local function handleUpdateNode(root, query, context)
       local left = child.children[1]
       local right = child.children[2]
       if left.type == "IDENTIFIER" and right.type == "object" then
+        context.idProvider = true
         resolveExpression(child, context)
+        context.idProvider = false
       else
         -- error
         errors.invalidUpdateEquality(context, child, left, right)

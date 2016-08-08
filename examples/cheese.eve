@@ -1,13 +1,20 @@
 choose
-  freeze
+```
+  match
+    [#session-connect]
+  commit
     [#cheese @mimolette]
     [#cheese @morbier]
     [#cheese @manchego]
     [#cheese @portsalut]
     [#cheese @wensleydale]
+```
 
 zikky
-  [#cheese name]
-  color = if length(name) > 6 then "orange" else "black"
-  maintain
-    [#div #foo ix: name, text: name, style: [color]]
+```
+  match
+    [#cheese name]
+    color = if length[string: name] > 8 then "orange" else "white"
+  bind
+    [#div text: name, sort: name, style: [color]]
+```

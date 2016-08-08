@@ -1,4 +1,0 @@
-Draw Signup Page
-  maintain
-    [#select @gender form: "sign up" children: [#option text: "female" [#option text: "male"] [#option text: "other"]]]
-

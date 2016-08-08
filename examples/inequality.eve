@@ -1,12 +1,18 @@
 people older than 20
-  person = [#person age]
-  age > 20
-  maintain
-   person += [#adult]
+```
+  match
+    person = [#person age]
+    age > 20
+  bind
+   person += #adult
+```
 
 inline people older than 20
-  [#person age > 20]
-  really-old = is(age > 100)
-  awesome = is(age = 50)
-  maintain
-   person += [#adult]
+```
+  match
+    [#person age > 20]
+    really-old = is(age > 100)
+    awesome = is(age = 50)
+  bind
+   person += #adult
+```

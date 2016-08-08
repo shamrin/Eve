@@ -1,5 +1,0 @@
-a pluralize "function" that can be reused
-  text = if number = 1 then singular
-         else then plural
-  maintain
-    [#pluralize singular? plural? number? text]

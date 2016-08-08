@@ -62,24 +62,6 @@ static CONTINUATION_2_4(do_sub, perf, sub, heap, perf, operator, value *);
 static void do_sub(perf p, sub s, heap h, perf pp, operator op, value *r)
 {
     start_perf(p, op);
-    boolean ziggy = false;
-
-
-    if (vector_length(s->projection) == 3){
-        value p0 = vector_get(s->projection, 0);
-        value p1 = vector_get(s->projection, 1);
-        value p2 = vector_get(s->projection, 2);
-        value r6 = (void *)(register_base) + 6;
-        value r7 = (void *)(register_base) + 7;
-        value r8 = (void *)(register_base) + 8;
-
-        if (((p0 == r6) || (p0 == r7) || (p0 == r8))  &&
-            ((p1 == r6) || (p1 == r7) || (p1 == r8))  &&
-            ((p2 == r6) || (p2 == r7) || (p2 == r8))) {
-            ziggy = true;
-        }
-    }
-
 
     if ((op == op_flush) || (op == op_close)){
         if (s->results){
@@ -345,7 +327,7 @@ static execf build_time(block bk, node n, execf *arms)
     value second = table_find(n->arguments, sym(seconds));
     value frame = table_find(n->arguments, sym(frames));
     ticks interval = seconds(60 * 60);
-    if(frame != 0) interval = seconds(1)/20; //milliseconds(1000 / 60);
+    if(frame != 0) interval = milliseconds(1000 / 60);
     else if(second != 0) interval = seconds(1);
     else if(minute != 0) interval = seconds(60);
     timer t = register_periodic_timer(interval, cont(bk->h, time_expire, bk));
@@ -374,19 +356,28 @@ static void do_random(block bk, perf p, execf n, value dest, value seed, timer t
     if (op == op_insert) {
         // This is all very scientific.
         u64 ub = value_as_key(lookup(r, seed));
-        u32 tb = (u64)bk->ev->t & 0x200000; // The 21 bottom tick bits are pretty random
+        u32 tb = (u64)bk->ev->t & (0x200000 - 1); // The 21 bottom tick bits are pretty random
 
         // Fold the tick bits down into a u8
-        u8 ts = (tb >> 7 ^ tb) >> 7 ^ tb;
+        u8 ts = (tb ^ (tb >> 7)
+                    ^ (tb >> 14)) & (0x80 - 1);
 
         // Fold the user seed bits down into a u8
-        u8 us = (((((((((ub >> 7 ^ ub) >> 7 ^ ub) >> 7 ^ ub) >> 7 ^ ub) >> 7 ^ ub) >> 7 ^ ub) >> 7 ^ ub) >> 7 ^ ub) >> 7 ^ ub);
+        u8 us = (ub ^ (ub >> 7)
+                    ^ (ub >> 14)
+                    ^ (ub >> 21)
+                    ^ (ub >> 28)
+                    ^ (ub >> 35)
+                    ^ (ub >> 42)
+                    ^ (ub >> 49)
+                    ^ (ub >> 56)
+                    ^ (ub >> 63)) & (0x80 - 1);
 
         // We fold down to 7 bits to gain some semblance of actual entropy. This means the RNG only has 128 outputs for now.
         u8 true_seed = us ^ ts;
 
         // No actual rng for now.
-        store(r, dest, box_float((double)true_seed/128.0));
+        store(r, dest, box_float(((double)true_seed)/128.0));
     }
     apply(n, h, p, op, r);
     stop_perf(p, pp);
@@ -395,7 +386,7 @@ static void do_random(block bk, perf p, execf n, value dest, value seed, timer t
 static execf build_random(block bk, node n)
 {
     value dest = table_find(n->arguments, sym(return));
-    value seed = table_find(n->arguments, sym(a));
+    value seed = table_find(n->arguments, sym(seed));
     ticks interval = milliseconds(1000 / 60);
     timer t = register_periodic_timer(interval, 0);
     return cont(bk->h,

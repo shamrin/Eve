@@ -1,5 +1,16 @@
+Add some people and potatoes
+```
+	bind
+  	[#person @joe]
+    [#person @sam]
+    [#farm potato: [@liam] [@lindy]]
+```
+
 Simple cross join example
-  [#person name]
-  [#farm potatos]
-  maintain
-    [#div text: name]
+```
+  match
+    [#person name]
+    [#farm potato]
+  bind
+    [#div text: "{{name}} - {{potato.name}}" sort: name]
+```

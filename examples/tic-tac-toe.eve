@@ -1,0 +1,98 @@
+Initialize board
+```
+  match
+    [#session-connect]
+
+    // board constants
+    width = 3
+    height = 3
+    n-in-a-row = 3
+    starting-player = "x"
+
+    // generate the cells
+    i = range[from: 0, to: width * height]
+    column = mod[value: i, by: width]
+    row = floor[value: i / width]
+    diag-left = column - row
+    diag-right = (width - column) - row
+
+  commit
+    board = [@board width height n-in-a-row player: starting-player]
+    [#cell board row column diag-left diag-right]
+```
+
+Click on a cell to make your move
+```
+  match
+    [#click #direct-target element: [#div cell]]
+    not(cell.player)
+    board = [@board player: current not(winner)]
+    next_player = if current = "x" then "o"
+                  else "x"
+  commit
+    board.player := next_player
+    cell.player := current
+```
+
+Get N in a row to win the game!
+```
+  match
+    board = [@board n-in-a-row width height not(winner)]
+    winner = if cell = [#cell row player]
+                n-in-a-row = count[given: cell, per: (row, player)] then player
+            else if cell = [#cell column player]
+                n-in-a-row = count[given: cell, per: (column, player)] then player
+            else if cell = [#cell diag-left player]
+                n-in-a-row = count[given: cell, per: (diag-left, player)] then player
+            else if cell = [#cell diag-right player]
+                n-in-a-row = count[given: cell, per: (diag-right, player)] then player
+            else if cell = [#cell player]
+                    width * height = count[given: cell] then "nobody"
+  commit
+    board.winner := winner
+```
+
+Reset the board state after a win
+```
+  match
+    [#click #direct-target]
+    board = [@board winner]
+    cell = [#cell player]
+  commit
+    board.winner -= winner
+    cell.player -= player
+```
+
+Draw the board
+```
+  match
+    board = [@board]
+    cell = [#cell board row column]
+    contents = if cell.player then cell.player
+              else ""
+  bind
+    [#div board @container children:
+      [#div #status board class: "status"]
+      [#div class: "board" children:
+        [#div class: "row" sort: row children:
+          [#div class: "cell" cell text: contents sort: column style:
+            [display: "inline-block" width: "50px" height: "50px" border: "1px solid rgb(47, 47, 49)" color: "black" background: "white" font-size: "2em" line-height: "50px" text-align: "center"]]]]]
+```
+
+Draw the current player
+```
+  match
+    status = [#status board]
+    not(board.winner)
+  bind
+    status.text += "{{board.player}}'s turn!"
+```
+
+Draw the winner
+```
+  match
+    status = [#status board]
+    winner = board.winner
+  bind
+    status.text += "{{winner}} wins! Click anywhere to restart!"
+```
