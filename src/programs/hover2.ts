@@ -52,7 +52,7 @@ prog
     let event = find("html/event/mouseenter");
     let expiration = find("expiration");
     return [
-      expiration.add("time", Infinity)
+      expiration.remove("time").add("time", Infinity)
     ];
   });
 
@@ -62,7 +62,7 @@ prog
     let expiration = find("expiration");
     let timer = find("timer");
     return [
-      expiration.add("time", timer.timestamp + 1000)
+      expiration.remove("time").add("time", timer.timestamp + 100)
     ];
   });
 
