@@ -31,21 +31,21 @@ prog
     ];
   });
 
-prog
-  .block("debug", ({find, record}) => {
-    let main = find("main");
-    let expiration = find("expiration");
-    let timer = find("timer");
-    
-    return [
-      main.add("children", [
-        record("html/div", {sort: -100})
-          .add("text", "expiration.time: " + expiration.time),
-        record("html/div", {sort: -99})
-          .add("text", "timer: " + timer.timestamp),
-      ])
-    ];
-  });
+// prog
+//   .block("debug", ({find, record}) => {
+//     let main = find("main");
+//     let expiration = find("expiration");
+//     let timer = find("timer");
+//
+//     return [
+//       main.add("children", [
+//         record("html/div", {sort: -100})
+//           .add("text", "expiration.time: " + expiration.time),
+//         record("html/div", {sort: -99})
+//           .add("text", "timer: " + timer.timestamp),
+//       ])
+//     ];
+//   });
 
 prog
   .commit("record expiration time on mouseenter", ({find, record}) => {
