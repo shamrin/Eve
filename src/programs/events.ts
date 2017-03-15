@@ -11,7 +11,7 @@ prog
 
     return [
       main.add("children", [
-        record("h", {tagname: "style"})
+        record("h/style")
           .add("text", `
             .eventer {background-color: #75507b;  width: 100px; height: 100px; margin: 25px; }
             .log {
@@ -20,18 +20,18 @@ prog
             }
             .input { width: 500px; margin: 0 25px 0 25px; }
           `),
-        record("h", {tagname: "div", sort: 0, class: "eventer", on: [
+        record("h/div", {sort: 0, class: "eventer", on: [
           "mouseenter",
           "mouseleave",
           "dblclick",
           "click",
         ]}),
-        record("h", {tagname: "input", sort: 1, class: "input", on: [
+        record("h/input", {sort: 1, class: "input", on: [
           "input",
           "focus",
           "blur",
         ]}),
-        record("h", "log", {tagname: "div", sort: 2, class: "log"}),
+        record("h/div", "log", {sort: 2, class: "log"}),
       ])
     ];
   });
@@ -42,16 +42,19 @@ prog
     let event = find("dom/event");
     return [
       log.add("children", [
-        record("h", {tagname: "div", event})
+        record("h/div", {event})
           .add("text", `${event.event} on <${event.element.tagname}>`),
       ])
     ];
   });
 
 prog
-  .block("Translate elements into html", ({find, record}) => {
-    let elem = find("h");
-    return [elem.add("tag", "html/element")];
+  .block("Translate elements into html", ({find, record, lib: {string}}) => {
+    let elem = find();
+    string.startswith(elem.tag, "h/");
+    let tagname = string.substring(elem.tag, 2);
+    
+    return [elem.add("tag", "html/element").add("tagname", tagname)];
   })
 
 prog.inputEavs([ [1, "tag", "main"] ]);

@@ -216,6 +216,29 @@ makeFunction({
   }
 });
 
+
+//--------------------------------------------------------------------
+// Random
+//--------------------------------------------------------------------
+
+makeFunction({
+  name: "string/startswith",
+  args: {text: "string", substring: "string"},
+  returns: {},
+  apply: function(text:string, substring:string) {
+    return (""+text).substr(0, substring.length) === substring ? [] : undefined;
+  }
+});
+
+makeFunction({
+  name: "string/substring",
+  args: {text: "string", start: "number"},
+  returns: {result: "string"},
+  apply: function(text:string, start:number) {
+    return [(""+text).substring(start)];
+  }
+});
+
 //--------------------------------------------------------------------
 // Eve internal
 //--------------------------------------------------------------------

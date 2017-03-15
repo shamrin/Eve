@@ -52,7 +52,7 @@ function doIt() {
 (global as any).doIt = doIt;
 
 
-doIt();
+// doIt();
 // import "./programs/flappy";
 // import "./programs/hover";
-// import "./programs/events";
+import "./programs/events";
