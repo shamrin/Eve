@@ -273,8 +273,10 @@ export abstract class DOMWatcher<Instance extends ElemInstance> extends Watcher 
           else if(a === "sort") continue; // I guess..?
           else if(a === "on") continue;
 
-          else if(a === "class") instance.classList.remove(""+v);
-          else if(a === "text") instance.textContent = null;
+          else if(a === "class") {
+            console.warn('-class', {e, a, v, instance});
+            instance.classList.remove(""+v);
+          } else if(a === "text") instance.textContent = null;
           else if(a === "style") this.removeStyleInstance(v, e);
           else instance.removeAttribute(""+a);
         }
@@ -287,8 +289,10 @@ export abstract class DOMWatcher<Instance extends ElemInstance> extends Watcher 
           else if(a === "children") continue;
           else if(a === "on") continue;
 
-          else if(a === "class") instance.classList.add(""+v);
-          else if(a === "sort") this.insertChild(instance.parentElement, instance, v);
+          else if(a === "class") {
+            console.warn('+class', {e, a, v, instance});
+            instance.classList.add(""+v);
+          } else if(a === "sort") this.insertChild(instance.parentElement, instance, v);
           else if(a === "text") instance.textContent = ""+v;
           else if(a === "style") this.addStyleInstance(v, e);
           else instance.setAttribute(""+a, ""+v);
@@ -310,7 +314,9 @@ export abstract class DOMWatcher<Instance extends ElemInstance> extends Watcher 
           let {instance, event, element} = adds[id];
 
           let domInstance = this.getInstance(instance)!;
+          console.log(`listening to ${event} on ${element}, instance: ${instance}, dom:`, domInstance);
           domInstance.addEventListener(event, () => {
+            console.log(`GOT ${event} on ${element}, instance: ${instance}, dom:`, domInstance);
             let changes:any[] = [];
             let eventId = uuid();
             changes.push(
