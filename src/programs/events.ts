@@ -11,7 +11,7 @@ prog
 
     return [
       main.add("children", [
-        record("html/style")
+        record("h", {tagname: "style"})
           .add("text", `
             .eventer {background-color: #75507b;  width: 100px; height: 100px; margin: 25px; }
             .log {
@@ -20,18 +20,18 @@ prog
             }
             .input { width: 500px; margin: 0 25px 0 25px; }
           `),
-        record("html/div", {sort: 0, class: "eventer", on: [
+        record("h", {tagname: "div", sort: 0, class: "eventer", on: [
           "mouseenter",
           "mouseleave",
           "dblclick",
           "click",
         ]}),
-        record("html/input", {sort: 1, class: "input", on: [
+        record("h", {tagname: "input", sort: 1, class: "input", on: [
           "input",
           "focus",
           "blur",
         ]}),
-        record("html/div", "log", {sort: 2, class: "log"}),
+        record("h", "log", {tagname: "div", sort: 2, class: "log"}),
       ])
     ];
   });
@@ -42,24 +42,16 @@ prog
     let event = find("dom/event");
     return [
       log.add("children", [
-        record("html/div", {text: `${event.event} on <${event.element.tagname}>`, event}),
+        record("h", {tagname: "div", event})
+          .add("text", `${event.event} on <${event.element.tagname}>`),
       ])
     ];
   });
 
 prog
   .block("Translate elements into html", ({find, record}) => {
-    let elem = find("html/div");
-    return [elem.add("tag", "html/element").add("tagname", "div")];
+    let elem = find("h");
+    return [elem.add("tag", "html/element")];
   })
-  .block("Translate elements into html", ({find, record}) => {
-    let elem = find("html/input");
-    return [elem.add("tag", "html/element").add("tagname", "input")];
-  })
-  .block("Translate elements into html", ({find, record}) => {
-    let elem = find("html/style");
-    return [elem.add("tag", "html/element").add("tagname", "style")];
-  });
-
 
 prog.inputEavs([ [1, "tag", "main"] ]);
