@@ -203,19 +203,37 @@ test("Aggregate: multi-direction sort", (assert) => {
   assert.end();
 });
 
-test("Aggregate: limit query with sort, count and range", (assert) => {
+test("Aggregate: limit query with sort", (assert) => {
   let prog = new Program("test");
 
-  prog.bind("limit query with sort, count and range", ({find, gather, lib:{math}}) => {
+  prog.bind("limit query with sort", ({find, gather}) => {
     let person = find("person");
     let pos = gather(person.name, person).sort();
-    let upper = math.min(gather(pos).count(), 2);
-    pos == math.range(1, upper);
+    pos <= 2;
     return [
       person.add("pos", pos)
     ];
   });
 
+  verifyLimit(assert, prog);
+});
+
+test("Aggregate: limit query with count", (assert) => {
+  let prog = new Program("test");
+
+  prog.bind("limit query with count", ({find, gather}) => {
+    let person = find("person");
+    let pos = gather(person.name, person).sort();
+    gather(person).count() <= 2;
+    return [
+      person.add("pos", pos)
+    ];
+  });
+
+  verifyLimit(assert, prog);
+});
+
+function verifyLimit(assert:test.Test, prog:Program)  {
   verify(assert, prog, [
     ["B", "tag", "person"],
     ["B", "name", "Jane"],
@@ -248,7 +266,7 @@ test("Aggregate: limit query with sort, count and range", (assert) => {
   ]);
 
   assert.end();
-});
+}
 
 test("Aggregate: group sort", (assert) => {
 
